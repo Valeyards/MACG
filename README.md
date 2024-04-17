@@ -3,4 +3,4 @@ This reposity holds the code of multi-axis cross gating network for deformable m
 
 
 ## License
-This code(PhaseFIT) is released under the GPLv3 License and is available for non-commercial academic purposes.
+This code is released under the GPLv3 License and is available for non-commercial academic purposes.
