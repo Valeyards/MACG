@@ -14,6 +14,71 @@ from torch.distributions.normal import Normal
 import torch.utils.checkpoint as checkpoint
 import time
 
+class MAgMLP_tokens(nn.Module):
+    # multi-axis gated MLP layer
+    # if do not use split heads plz /2 channels. 
+    def __init__(self, in_channel,block_size,grid_size,block_gmlp_factor= 2,grid_gmlp_factor = 2,input_proj_factor = 2, bias = True,dropout_rate = 0.0, split_head=True, mixer=None):
+        super().__init__()
+        self.in_channel=in_channel   
+        self.grid_size=grid_size
+        self.block_size=block_size
+        self.block_gmlp_factor= block_gmlp_factor
+        self.grid_gmlp_factor = grid_gmlp_factor
+        self.input_proj_factor = input_proj_factor
+        self.bias = bias
+        self.dropout_rate =dropout_rate
+        self.dropout = nn.Dropout(self.dropout_rate)
+        self.split_head = split_head
+        
+        self.mixer = mixer
+        if not self.split_head:
+            self.linear1 = nn.Linear(self.in_channel,self.in_channel//2,bias=self.bias)
+            self.gridtokenmixer=GridTokenMixLayer(in_channel=self.in_channel//2,grid_size=self.grid_size,bias=self.bias,
+                              factor=self.grid_gmlp_factor,dropout_rate=self.dropout_rate, tokenmixer=self.mixer)
+            self.blocktokenmixer=BlockTokenMixLayer(in_channel=self.in_channel//2,block_size=self.block_size,bias=self.bias,
+                              factor=self.block_gmlp_factor,dropout_rate=self.dropout_rate, tokenmixer=self.mixer)
+            self.linear2=nn.Linear(self.in_channel//2,self.in_channel,bias=self.bias)
+        else:
+            self.linear1=nn.Linear(self.in_channel,self.in_channel*self.input_proj_factor,bias=self.bias)
+            self.gridtokenmixer=GridTokenMixLayer(in_channel=self.in_channel,grid_size=self.grid_size,bias=self.bias,
+                              factor=self.grid_gmlp_factor,dropout_rate=self.dropout_rate, tokenmixer=self.mixer)
+            self.blocktokenmixer=BlockTokenMixLayer(in_channel=self.in_channel,block_size=self.block_size,bias=self.bias,
+                              factor=self.block_gmlp_factor,dropout_rate=self.dropout_rate, tokenmixer=self.mixer)
+            self.linear2=nn.Linear(self.in_channel*self.input_proj_factor,self.in_channel,bias=self.bias)
+
+    def forward(self, x, deterministic=True):
+        shortcut = x
+        n,c,d,h,w = x.shape
+        
+        norm = nn.LayerNorm([c, d, h, w]).to(x.device)
+        x = norm(x)
+        x= torch.swapaxes(x,-1,-4)
+        x = self.linear1(x)  
+        x =torch.swapaxes(x,-1,-4)
+        
+        x = F.gelu(x)
+        if self.split_head:
+            u, v = np.split(x, 2, axis=1)
+            # GridGMLPLayer
+            u = self.gridtokenmixer(u)
+
+            # BlockGMLPLayer
+            v = self.blocktokenmixer(v)
+            x = torch.cat([u, v], dim=1)  
+            x= torch.swapaxes(x,-1,-4)
+            x =self.linear2(x)
+            x = torch.swapaxes(x,-1,-4)
+            #x = F.dropout(x,self.dropout_rate,deterministic)
+        else:
+            x = self.gridtokenmixer(x)
+            x = self.blocktokenmixer(x)
+            x = torch.swapaxes(x,-1,-4)
+            x = self.linear2(x)
+            x = torch.swapaxes(x,-1,-4)
+        x = self.dropout(x)
+        x = x + shortcut
+        return x
+
 class dw_sep_conv(nn.Module):
     def __init__(self, in_channel):
         super().__init__()
